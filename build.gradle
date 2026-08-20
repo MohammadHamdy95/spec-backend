@@ -1,0 +1,49 @@
+plugins {
+	id 'java'
+	id 'org.springframework.boot' version '4.1.0'
+	id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'app.hamdy'
+version = '0.0.1-SNAPSHOT'
+description = 'OpenAPI spec sharing API for spec.hamdy.app'
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(23)
+	}
+}
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	implementation 'org.springframework.boot:spring-boot-starter-data-cassandra'
+	implementation 'org.springframework.boot:spring-boot-starter-validation'
+	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+
+	// Parses and validates Swagger 2.0, OpenAPI 3.0.x and 3.1.x, and reports
+	// where a document is wrong rather than just that it is.
+	implementation 'io.swagger.parser.v3:swagger-parser:2.1.47'
+
+	// Semantic diff between two specs, with each change classified as
+	// compatible or breaking. This is why the diff feature is tractable:
+	// comparing parsed API models, not text.
+	implementation 'org.openapitools.openapidiff:openapi-diff-core:2.1.7'
+
+	// Specs arrive as JSON or YAML and must be convertible both ways.
+	implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml'
+
+	testImplementation 'org.springframework.boot:spring-boot-starter-data-cassandra-test'
+	testImplementation 'org.springframework.boot:spring-boot-starter-validation-test'
+	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+	testImplementation 'org.springframework.boot:spring-boot-testcontainers'
+	testImplementation 'org.testcontainers:testcontainers-cassandra'
+	testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+	useJUnitPlatform()
+}

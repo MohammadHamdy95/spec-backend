@@ -1,0 +1,30 @@
+spring:
+  application:
+    name: spec-backend
+  cassandra:
+    contact-points: ${SPRING_CASSANDRA_CONTACT_POINTS:localhost}
+    port: ${SPRING_CASSANDRA_PORT:9042}
+    local-datacenter: ${SPRING_CASSANDRA_LOCAL_DATACENTER:datacenter1}
+    keyspace-name: ${SPRING_CASSANDRA_KEYSPACE_NAME:spec}
+  mvc:
+    problemdetails:
+      enabled: true
+  # Specs are an order of magnitude larger than pastes; the default 1MB
+  # request cap would reject perfectly ordinary documents.
+  servlet:
+    multipart:
+      max-request-size: 24MB
+      max-file-size: 24MB
+
+server:
+  # Same reason: the JSON body carrying a 20MB spec has to fit.
+  max-http-request-header-size: 64KB
+  tomcat:
+    max-swallow-size: 24MB
+    max-http-form-post-size: 24MB
+
+spec:
+  public-url: ${SPEC_PUBLIC_URL:https://spec.hamdy.app}
+  # 20MB. Real-world specs run to a few MB; this leaves headroom without
+  # letting the service become general-purpose file storage.
+  max-content-bytes: ${SPEC_MAX_CONTENT_BYTES:20971520}
