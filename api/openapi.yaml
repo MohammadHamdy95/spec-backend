@@ -1,0 +1,476 @@
+openapi: 3.1.0
+info:
+  title: Spec API
+  version: 1.0.0
+  description: |
+    API for spec.hamdy.app — paste an OpenAPI or Swagger document, get a
+    link that renders it as browsable reference documentation.
+
+    Served same-origin under `/v1`, so the UI and the API share an origin and
+    there is no CORS surface. Not on `api.spec.hamdy.app`: that is a
+    two-level subdomain, which Cloudflare's free Universal SSL does not
+    cover.
+
+    **Publishing is anonymous; editing is not.** Creating a spec returns an
+    `editToken` in that one response and nowhere else — only its SHA-256 is
+    stored, so it cannot be recovered later. Every revision must present it.
+    Anyone with the link can read; only the token holder can write.
+
+    Three dialects are accepted — Swagger 2.0, OpenAPI 3.0 and OpenAPI 3.1 —
+    and the submitted format (JSON or YAML) is detected, not declared.
+    Documents are stored byte for byte as submitted: reformatting someone's
+    YAML would lose their comments and key order, making the shared copy
+    differ from the file they maintain.
+
+    External `$ref`s are never resolved at parse time, so a submitted
+    document cannot make this server fetch a URL of its choosing.
+
+    Errors are RFC 9457 Problem Details.
+servers:
+  - url: https://spec.hamdy.app
+    description: production
+  - url: http://localhost:8080
+    description: backend run directly
+
+# Reads are open. Writes authenticate with the X-Edit-Token header, declared
+# per-operation rather than here, because it applies to exactly one of them.
+security: []
+
+tags:
+  - name: specs
+    description: Publishing, reading and revising shared documents
+  - name: versions
+    description: Revision history and semantic comparison
+  - name: meta
+
+paths:
+  /v1/specs:
+    post:
+      tags: [specs]
+      operationId: createSpec
+      summary: Publish a spec
+      description: |
+        Validates the document and stores it as revision 1. The response is
+        the only place the `editToken` ever appears — losing it means the
+        spec can still be read and shared, but never revised.
+
+        A document that is not a usable API description is refused with 422
+        and the parser's own messages, rather than published as a link that
+        renders an error.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSpecRequest' }
+            examples:
+              minimal:
+                summary: Just the document
+                value:
+                  body: |
+                    openapi: 3.1.0
+                    info: { title: Widgets, version: '1.0.0' }
+                    paths: {}
+              full:
+                summary: With expiry and a revision note
+                value:
+                  body: '{"openapi":"3.1.0","info":{"title":"Widgets","version":"1.0.0"},"paths":{}}'
+                  expiresInDays: 30
+                  note: first draft
+      responses:
+        '201':
+          description: Published. Carries the edit token.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Spec' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/InvalidSpec' }
+
+  /v1/specs/{id}:
+    parameters:
+      - $ref: '#/components/parameters/SpecId'
+    get:
+      tags: [specs]
+      operationId: getSpec
+      summary: Fetch the latest revision
+      responses:
+        '200':
+          description: The spec, at its latest revision
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Spec' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [specs]
+      operationId: updateSpec
+      summary: Publish a revision
+      description: |
+        Adds a revision. The id and the share link do not change — only
+        `latestVersion` moves — so a link sent last month keeps working and
+        keeps showing what its sender meant.
+      security:
+        - editToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateSpecRequest' }
+      responses:
+        '200':
+          description: Revision published
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Spec' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/InvalidSpec' }
+
+  /v1/specs/{id}/versions:
+    get:
+      tags: [versions]
+      operationId: listVersions
+      summary: Revision history
+      description: Newest first. Bodies are omitted so listing stays cheap.
+      parameters:
+        - $ref: '#/components/parameters/SpecId'
+      responses:
+        '200':
+          description: Every revision, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/VersionSummary' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/specs/{id}/versions/{version}:
+    get:
+      tags: [versions]
+      operationId: getSpecVersion
+      summary: Fetch one revision
+      description: |
+        Revisions are immutable once written, so an old link renders exactly
+        what it rendered the day it was shared.
+      parameters:
+        - $ref: '#/components/parameters/SpecId'
+        - $ref: '#/components/parameters/VersionNumber'
+      responses:
+        '200':
+          description: That revision
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Spec' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/specs/{id}/diff:
+    get:
+      tags: [versions]
+      operationId: diffVersions
+      summary: Compare two revisions
+      description: |
+        A **semantic** diff: the two revisions are parsed into API models and
+        those are compared, so the result speaks in endpoints, parameters and
+        schemas rather than lines. Each change is classified as breaking or
+        compatible for existing callers.
+
+        Defaults to "the previous revision against the latest", which is the
+        comparison people almost always want.
+      parameters:
+        - $ref: '#/components/parameters/SpecId'
+        - name: from
+          in: query
+          required: false
+          description: Revision to compare against. Defaults to `to` minus one.
+          schema: { type: integer, minimum: 1 }
+        - name: to
+          in: query
+          required: false
+          description: Revision to compare. Defaults to the latest.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: The comparison
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Diff' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/specs/{id}/raw:
+    get:
+      tags: [specs]
+      operationId: getSpecRaw
+      summary: The document as submitted
+      description: Byte for byte what was pasted, in its original format.
+      parameters:
+        - $ref: '#/components/parameters/SpecId'
+      responses:
+        '200':
+          description: Raw document
+          content:
+            text/plain:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/specs/{id}/json:
+    get:
+      tags: [specs]
+      operationId: getSpecAsJson
+      summary: The document as JSON
+      description: Converted if it was submitted as YAML; unchanged otherwise.
+      parameters:
+        - $ref: '#/components/parameters/SpecId'
+      responses:
+        '200':
+          description: JSON form
+          content:
+            application/json:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/specs/{id}/yaml:
+    get:
+      tags: [specs]
+      operationId: getSpecAsYaml
+      summary: The document as YAML
+      description: Converted if it was submitted as JSON; unchanged otherwise.
+      parameters:
+        - $ref: '#/components/parameters/SpecId'
+      responses:
+        '200':
+          description: YAML form
+          content:
+            application/yaml:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/health:
+    get:
+      tags: [meta]
+      operationId: health
+      summary: Liveness probe
+      responses:
+        '200':
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: ok }
+
+components:
+  securitySchemes:
+    editToken:
+      type: apiKey
+      in: header
+      name: X-Edit-Token
+      description: |
+        The 32-character token returned once by `createSpec`. Compared against
+        a stored SHA-256 in constant time.
+
+  parameters:
+    SpecId:
+      name: id
+      in: path
+      required: true
+      description: 10-character base62 id.
+      schema:
+        type: string
+        pattern: '^[0-9A-Za-z]{10}$'
+      example: wmHfipq923
+    VersionNumber:
+      name: version
+      in: path
+      required: true
+      description: Revision number, counting from 1.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 999999
+
+  schemas:
+    CreateSpecRequest:
+      type: object
+      required: [body]
+      properties:
+        body:
+          type: string
+          description: |
+            The document, JSON or YAML — the format is detected, not declared.
+            Up to 20 MB.
+        expiresInDays:
+          type: [integer, 'null']
+          minimum: 1
+          description: |
+            Omitted, null or 0 means never expire, which is the default:
+            specs are reference documents people bookmark.
+        note:
+          type: [string, 'null']
+          description: Free-text label for this revision, e.g. "added /orders".
+
+    UpdateSpecRequest:
+      type: object
+      required: [body]
+      properties:
+        body:
+          type: string
+          description: The replacement document, JSON or YAML.
+        note:
+          type: [string, 'null']
+
+    Spec:
+      type: object
+      description: One revision of a shared document, plus the document's own metadata.
+      required:
+        - id
+        - url
+        - title
+        - specVersion
+        - version
+        - latestVersion
+        - format
+        - sizeBytes
+        - operationCount
+        - createdAt
+        - updatedAt
+        - body
+      properties:
+        id: { type: string, pattern: '^[0-9A-Za-z]{10}$' }
+        url:
+          type: string
+          format: uri
+          description: 'The share link: https://spec.hamdy.app/{id}'
+        title:
+          type: string
+          description: The document's `info.title`, or a placeholder when absent.
+        apiVersion:
+          type: [string, 'null']
+          description: The described API's own `info.version` — not the revision number.
+        specVersion:
+          type: string
+          enum: [swagger_2_0, openapi_3_0, openapi_3_1]
+          description: |
+            Which dialect was submitted. Detected from the raw text, because
+            the parser upconverts Swagger 2.0 and would otherwise report every
+            document as OpenAPI 3.
+        version:
+          type: integer
+          description: Which revision this response carries.
+        latestVersion:
+          type: integer
+          description: The newest revision that exists.
+        format:
+          type: string
+          enum: [json, yaml]
+          description: The format this revision was submitted in.
+        sizeBytes: { type: integer }
+        operationCount:
+          type: integer
+          description: Operations across all paths.
+        note: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        expiresAt:
+          type: [string, 'null']
+          format: date-time
+          description: Null when the spec never expires.
+        body:
+          type: string
+          description: The document exactly as submitted.
+        editToken:
+          type: [string, 'null']
+          description: |
+            Present **only** in the 201 from `createSpec`, and null on every
+            read — otherwise anyone with the link could revise the spec.
+
+    VersionSummary:
+      type: object
+      description: A row in the history list. No body, so listing stays cheap.
+      required: [version, sizeBytes, operationCount, format, createdAt]
+      properties:
+        version: { type: integer }
+        sizeBytes: { type: integer }
+        operationCount: { type: integer }
+        format: { type: string, enum: [json, yaml] }
+        note: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+
+    Diff:
+      type: object
+      description: A semantic comparison of two revisions.
+      required: [fromVersion, toVersion, compatible, breakingCount, changes]
+      properties:
+        fromVersion: { type: integer }
+        toVersion: { type: integer }
+        compatible:
+          type: boolean
+          description: True when nothing here can break an existing caller.
+        breakingCount: { type: integer }
+        changes:
+          type: array
+          description: Every change, breaking ones first.
+          items: { $ref: '#/components/schemas/Change' }
+
+    Change:
+      type: object
+      required: [kind, area, subject, breaking]
+      properties:
+        kind: { type: string, enum: [ADDED, REMOVED, MODIFIED] }
+        area:
+          type: string
+          description: 'What changed: endpoint, parameter, response, schema…'
+        subject:
+          type: string
+          description: Which one.
+          example: GET /orders/{id}
+        detail: { type: [string, 'null'], description: What specifically changed. }
+        breaking: { type: boolean }
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details
+      required: [title, status]
+      properties:
+        type: { type: string, format: uri, default: 'about:blank' }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+
+  responses:
+    BadRequest:
+      description: Malformed request body, or a missing edit-token header
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: Wrong or missing edit token
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: No such spec or revision (unknown or expired)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    TooLarge:
+      description: Document exceeds 20 MB
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    InvalidSpec:
+      description: |
+        Not a usable API description. Carries an extra `errors` array with the
+        parser's messages, so a UI can point at what is actually wrong instead
+        of saying "invalid spec".
+      content:
+        application/problem+json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Problem'
+              - type: object
+                properties:
+                  errors:
+                    type: array
+                    items: { type: string }
